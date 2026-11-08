@@ -1,160 +1,138 @@
 
 import { NextResponse } from 'next/server';
+
 import {
   connectDB,
-  Room,
-  User,
-  Message,
-  Upload,
-  isMember,
-  shape
+  Room
 } from '@/lib/db';
+
 import { getSession } from '@/lib/auth';
-import { remove } from '@/lib/storage';
 
-const err = (m, status) =>
-  NextResponse.json({ error: m }, { status });
+const err = (message, status) =>
+  NextResponse.json({ error: message }, { status });
 
-// Load room and validate session
-async function load(req, id) {
-  const s = getSession(req);
-
-  if (!s?.id) {
-    return { res: err('Unauthorized', 401) };
-  }
-
-  if (!id) {
-    return { res: err('Room ID is required', 400) };
-  }
-
+// GET: Fetch all rooms available to the logged-in user
+export async function GET(req) {
   try {
-    await connectDB();
+    const s = getSession(req);
 
-    const room = await Room.findById(id);
-
-    if (!room) {
-      return { res: err('Not found', 404) };
+    if (!s?.id) {
+      return err('Unauthorized', 401);
     }
 
-    return {
-      s,
-      room,
-      manage: String(room.owner) === s.id || s.role === 'admin'
-    };
+    await connectDB();
+
+    // Admins can see all rooms.
+    // Other users can see public rooms and private rooms
+    // where they are members or owners.
+    const query = s.role === 'admin'
+      ? {}
+      : {
+        $or: [
+          { isPrivate: false },
+          { members: s.id },
+          { owner: s.id }
+        ]
+      };
+
+    const rooms = await Room.find(query)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const formattedRooms = rooms.map((room) => {
+      const joined = room.members.some(
+        (member) => String(member) === String(s.id)
+      );
+
+      const canManage =
+        String(room.owner) === String(s.id) ||
+        s.role === 'admin';
+
+      return {
+        _id: String(room._id),
+        name: room.name,
+        owner: String(room.owner),
+        isPrivate: room.isPrivate,
+        joined: joined || canManage,
+        canManage
+      };
+    });
+
+    return NextResponse.json({
+      rooms: formattedRooms
+    });
 
   } catch (error) {
-    console.error('Room loading error:', error);
-    return { res: err('Internal server error', 500) };
+    console.error('Fetch rooms error:', error);
+
+    return err('Internal server error', 500);
   }
 }
 
-// Message history (members only)
-export async function GET(req, { params }) {
-  const { id } = await params;
+// POST: Create a new room
+export async function POST(req) {
+  try {
+    const s = getSession(req);
 
-  const { s, room, res } = await load(req, id);
+    if (!s?.id) {
+      return err('Unauthorized', 401);
+    }
 
-  if (res) return res;
+    await connectDB();
 
-  if (!(await isMember(room._id, s.id))) {
-    return err('Forbidden', 403);
+    const body = await req.json().catch(() => ({}));
+
+    const name = String(body.name || '').trim();
+    const isPrivate = body.isPrivate === true;
+
+    if (!name) {
+      return err('Room name is required', 400);
+    }
+
+    if (name.length > 50) {
+      return err('Room name cannot exceed 50 characters', 400);
+    }
+
+    // Check whether the room already exists
+    const existingRoom = await Room.findOne({ name });
+
+    if (existingRoom) {
+      return err('A room with this name already exists', 409);
+    }
+
+    // Create room and automatically add creator as a member
+    const room = await Room.create({
+      name,
+      owner: s.id,
+      isPrivate,
+      members: [s.id]
+    });
+
+    const formattedRoom = {
+      _id: String(room._id),
+      name: room.name,
+      owner: String(room.owner),
+      isPrivate: room.isPrivate,
+      joined: true,
+      canManage: true
+    };
+
+    return NextResponse.json(
+      {
+        message: 'Room created successfully',
+        room: formattedRoom
+      },
+      { status: 201 }
+    );
+
+  } catch (error) {
+    // Handle MongoDB duplicate-key error
+    if (error.code === 11000) {
+      return err('A room with this name already exists', 409);
+    }
+
+    console.error('Create room error:', error);
+
+    return err('Internal server error', 500);
   }
-
-  const before = req.nextUrl.searchParams.get('before');
-
-  const q = {
-    room: room._id,
-    ...(before ? { _id: { $lt: before } } : {})
-  };
-
-  const msgs = await Message.find(q)
-    .sort({ _id: -1 })
-    .limit(50)
-    .populate('sender', 'username')
-    .lean();
-
-  return NextResponse.json({
-    messages: msgs.reverse().map(shape)
-  });
-}
-
-// Join a public room
-export async function POST(req, { params }) {
-  const { id } = await params;
-
-  const { room, s, res } = await load(req, id);
-
-  if (res) return res;
-
-  if (room.isPrivate) {
-    return err('Private room: ask the owner to add you', 403);
-  }
-
-  await Room.updateOne(
-    { _id: room._id },
-    { $addToSet: { members: s.id } }
-  );
-
-  return NextResponse.json({ ok: true });
-}
-
-// Owner/admin adds a member by username
-export async function PUT(req, { params }) {
-  const { id } = await params;
-
-  const { room, manage, res } = await load(req, id);
-
-  if (res) return res;
-
-  if (!manage) {
-    return err('Forbidden', 403);
-  }
-
-  const { add = '' } = await req.json().catch(() => ({}));
-
-  const u = await User.findOne({
-    username: String(add).toLowerCase().trim()
-  });
-
-  if (!u) {
-    return err('User not found', 404);
-  }
-
-  await Room.updateOne(
-    { _id: room._id },
-    { $addToSet: { members: u._id } }
-  );
-
-  return NextResponse.json({ ok: true });
-}
-
-// Owner/admin deletes the room, its messages and files
-export async function DELETE(req, { params }) {
-  const { id } = await params;
-
-  const { room, manage, res } = await load(req, id);
-
-  if (res) return res;
-
-  if (!manage) {
-    return err('Forbidden', 403);
-  }
-
-  if (room.name === 'general') {
-    return err('The general room cannot be deleted', 400);
-  }
-
-  const ups = await Upload.find({ room: room._id }).lean();
-
-  await Promise.all(
-    ups.map((u) => remove(u.stored))
-  );
-
-  await Promise.all([
-    Upload.deleteMany({ room: room._id }),
-    Message.deleteMany({ room: room._id }),
-    Room.deleteOne({ _id: room._id })
-  ]);
-
-  return NextResponse.json({ ok: true });
 }
