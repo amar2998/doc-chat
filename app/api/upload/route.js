@@ -1,12 +1,11 @@
 import { NextResponse } from 'next/server';
-import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 import { connectDB, Upload, isMember } from '@/lib/db';
 import { getSession, limited } from '@/lib/auth';
+import { put } from '@/lib/storage';
 
 const MAX = (parseInt(process.env.MAX_UPLOAD_MB, 10) || 25) * 1024 * 1024;
-const dir = () => process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads');
 const err = (m, status) => NextResponse.json({ error: m }, { status });
 
 export async function POST(req) {
@@ -25,10 +24,15 @@ export async function POST(req) {
 
   const ext = path.extname(file.name || '').toLowerCase().replace(/[^a-z0-9.]/g, '').slice(0, 10);
   const stored = crypto.randomUUID() + ext;
-  await fs.mkdir(dir(), { recursive: true });
-  await fs.writeFile(path.join(dir(), stored), Buffer.from(await file.arrayBuffer()));
+  const mime = file.type || 'application/octet-stream';
+  try {
+    await put(stored, Buffer.from(await file.arrayBuffer()), mime);
+  } catch (e) {
+    console.error('storage put failed', e);
+    return err('Storage error', 502);
+  }
 
   const name = (file.name || 'file').replace(/[\r\n"\\/]/g, '_').slice(0, 120);
-  const up = await Upload.create({ owner: s.id, room: roomId, stored, name, mime: file.type || 'application/octet-stream', size: file.size });
+  const up = await Upload.create({ owner: s.id, room: roomId, stored, name, mime, size: file.size });
   return NextResponse.json({ id: String(up._id), name, mime: up.mime, size: up.size });
 }
