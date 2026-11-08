@@ -5,6 +5,10 @@ const { Server } = require('socket.io');
 const { connectDB, Room, Message, Upload, isMember, shape } = require('./lib/db');
 const { verify, limited, COOKIE } = require('./lib/auth');
 
+console.log('[boot] node', process.version, 'NODE_ENV=' + process.env.NODE_ENV, 'PORT=' + process.env.PORT);
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
+process.on('uncaughtException', (e) => { console.error('[uncaughtException]', e); process.exit(1); });
+
 const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
 const handle = app.getRequestHandler();
@@ -14,8 +18,7 @@ const cookieVal = (h = '', n) => {
   return p ? decodeURIComponent(p.slice(n.length + 1)) : null;
 };
 
-app.prepare().then(async () => {
-  await connectDB();
+app.prepare().then(() => {
   const server = createServer((req, res) => handle(req, res));
   const io = new Server(server);
 
@@ -62,4 +65,13 @@ app.prepare().then(async () => {
 
   const port = parseInt(process.env.PORT || '3000', 10);
   server.listen(port, '0.0.0.0', () => console.log(`> Ready on :${port} (${dev ? 'dev' : 'prod'})`));
-});
+
+  // Connect to MongoDB in the background so a DB problem never kills the server.
+  // Check /api/health to see the current DB state.
+  (async () => {
+    for (; ;) {
+      try { await connectDB(); console.log('[db] connected'); return; }
+      catch (e) { console.error('[db] retrying in 5s:', e.message); await new Promise((r) => setTimeout(r, 5000)); }
+    }
+  })();
+}).catch((e) => { console.error('[fatal] Next.js failed to start:', e); process.exit(1); });
