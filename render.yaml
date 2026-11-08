@@ -1,0 +1,22 @@
+# Render Blueprint. Dashboard: New + > Blueprint > pick your repo.
+services:
+  - type: web
+    name: dockside-chat
+    runtime: docker
+    plan: starter            # persistent disks need a paid instance
+    healthCheckPath: /api/health
+    disk:
+      name: uploads
+      mountPath: /data/uploads
+      sizeGB: 5
+    envVars:
+      - key: MONGODB_URI
+        sync: false          # you paste the Atlas URI in the dashboard
+      - key: JWT_SECRET
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: UPLOAD_DIR
+        value: /data/uploads
+      - key: MAX_UPLOAD_MB
+        value: "25"

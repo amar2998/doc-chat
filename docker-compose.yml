@@ -1,0 +1,29 @@
+# DEV: hot-reload Next.js + local MongoDB.   Run: docker compose up
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports: ["127.0.0.1:27017:27017"]
+    volumes: [mongo_data:/data/db]
+
+  app:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    ports: ["3000:3000"]
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/dockside
+      JWT_SECRET: dev-only-secret-change-me
+      COOKIE_SECURE: "false"
+      UPLOAD_DIR: /data/uploads
+      MAX_UPLOAD_MB: "25"
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - uploads:/data/uploads
+    depends_on: [mongo]
+
+volumes:
+  mongo_data:
+  node_modules:
+  uploads:
